@@ -1,0 +1,730 @@
+---
+title: "Informe práctica Imbalanced"
+author: | 
+  | Juan Ignacio Isern Ghosn
+  | Universidad de Granada
+  | Minería de datos: Aspectos avanzados
+date: "05/02/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+\newpage
+\tableofcontents 
+\newpage
+
+# Introducción
+En esta práctica se pretende que el estudiante comprenda las implicaciones que tiene un conjunto con clases desequilibradas (imbalanced) en el rendimiento de los clasificadores estándar.
+
+La práctica se divide en dos partes bien diferenciadas:
+
+1.  Una primera parte donde se analizará el rendimiento alcanzado por los clasificadores mediante el uso de técnicas básicas de preprocesamiento. Para ello se utilizarán conjuntos de datos sencillos mediante el software R. Este estudio se realizará durante la misma clase de prácticas.
+2.  Una segunda parte, también a realizar durante la sesión de prácticas, en la que se analizará el comportamiento de los algoritmos de SMOTE extendidos en comparación con el SMOTE clásico. 
+
+## Configuración del entorno
+En este epígrafe de la memoria se ajusta el entorno para poder llevar a cabo las operaciones necesarias para culminar con los objetivos del trabajo.
+
+### Librerías
+A continuación se lleva a cabo la carga de los paquetes y/o librerías necesarias para poder llevar a cabo la ejecución del proyecto de forma correcta:
+
+```{r}
+library(caret)
+library(dplyr)
+library(pROC)
+library(tidyr)
+library(imbalance)
+```
+
+### Funciones
+Del mismo modo, se cargan aquellas funciones provistas por el equipo docente de la asignatura para facilitar el desarollo del trabajo:
+
+```{r}
+# Aprendizaje de un modelo k-NN para probar cada uno de los algoritmos de sampling.
+learn_model <-function(dataset, ctrl, message){
+    knn.fit <- train(Class ~ ., data = dataset, method = "knn", 
+                     trControl = ctrl, preProcess = c("center","scale"), metric="ROC", 
+                     tuneGrid = expand.grid(k = c(1,3,5,7,9,11)))
+    knn.pred <- predict(knn.fit,newdata = dataset)
+    #Get the confusion matrix to see accuracy value and other parameter values
+    knn.cm <- confusionMatrix(knn.pred, dataset$Class,positive = "positive")
+    knn.probs <- predict(knn.fit,newdata = dataset, type="prob")
+    knn.roc <- roc(dataset$Class,knn.probs[,"positive"],color="green")
+    return(knn.fit)
+}
+
+# Función para mostrar métricas de evaluación del modelo k-NN generado.
+test_model <- function(dataset, knn.fit, message, plot = TRUE){
+    knn.pred <- predict(knn.fit, newdata = dataset)
+    #Get the confusion matrix to see accuracy value and other parameter values
+    knn.cm <- confusionMatrix(knn.pred, dataset$Class,positive = "positive")
+    print(knn.cm)
+    knn.probs <- predict(knn.fit,newdata = dataset, type="prob")
+    knn.roc <- roc(dataset$Class,knn.probs[,"positive"])
+    #print(knn.roc)
+    if(plot){
+        plot(knn.roc, type="S", print.thres= 0.5,main=c("ROC Test",message),col="blue")
+    }
+    #print(paste0("AUC Test ",message,auc(knn.roc)))
+    return(knn.cm)
+}
+```
+
+### Conjuntos de datos
+Para la evaluación de los distintos algoritmos de sampling utilizaremos como primera aproximación los conjuntos de datos *circle* y *subclus*, que son cargados a continuación:
+
+```{r}
+dataset_subclus <- read.table("subclus.txt", sep=",")
+dataset_circle <- read.table("circle.txt", sep=",")
+```
+
+#### Conjunto de datos subclus
+A fin de tener una mejor imagen del conjunto de datos *subclus*, se visualiza un resumen de sus atributon. Del mismo modo, se cambia el nombre de sus atributos por una cuestión de comodidad:
+
+```{r}
+summary(dataset_subclus)
+colnames(dataset_subclus) <- c("Att1", "Att2", "Class")
+```
+
+Podemos visualizar en un gráfico de dispersión el conjunto de datos anterior:
+
+```{r}
+plot(dataset_subclus$Att1, dataset_subclus$Att2)
+points(dataset_subclus[dataset_subclus$Class=="negative",1],
+       dataset_subclus[dataset_subclus$Class=="negative",2],col="red")
+points(dataset_subclus[dataset_subclus$Class=="positive",1],
+       dataset_subclus[dataset_subclus$Class=="positive",2],col="blue") 
+```
+
+#### Conjunto de datos circle
+A fin de tener una mejor imagen del conjunto de datos *circle*, se visualiza un resumen de sus atributon. Del mismo modo, se cambia el nombre de sus atributos por una cuestión de comodidad:
+```{r}
+summary(dataset_circle)
+colnames(dataset_circle) <- c("Att1", "Att2", "Class")
+```
+
+Podemos visualizar en un gráfico de dispersión el conjunto de datos anterior:
+```{r}
+plot(dataset_circle$Att1, dataset_circle$Att2)
+points(dataset_circle[dataset_circle$Class=="negative",1],
+       dataset_circle[dataset_circle$Class=="negative",2],col="red")
+points(dataset_circle[dataset_circle$Class=="positive",1],
+       dataset_circle[dataset_circle$Class=="positive",2],col="blue") 
+```
+
+#### Conjunto de datos Iris0
+Para llevar a cabo una comparativa entre diversos algoritmos de sampling en el último punto de este informe, se ha utilizado el conjunto de datos Iris0. Este dataset es de clasificación binaria y comprende casos positivos y negativos acerca de la flor del Iris de acuerdo a medidas del pétalo y sépalo:
+
+```{r}
+data(iris0)
+summary(iris0)
+```
+
+\newpage
+
+# Análisis del efecto del desbalanceo en problemas de clasificación
+En este epígrafe se analizarán las estrategias a nivel de datos ROS, RUS y SMOTE para tratar con distribuciones de datos no balanceadas. Para ello, en primer lugar se halla un modelo base de clasificación a utilizar como referencia, para posteriormente mediante las respectivas métricas de calidad, evaluar si los algoritmos de sampling utilizados permiten mejorar. Como algoritmo de clasificación se utiliza k-NN en todos los casos.
+
+## Modelo base de clasificación
+En primer lugar, se genera un modelo de clasificación base sobre el cual llevamos a cabo las distintas comparativas. Para todos los modelos generados, llevaremos a cabo una división del conjunto de datos entre train y test:
+
+```{r}
+# Semilla (Reproducibilidad del experimento)
+set.seed(42)
+# Índices para llevar a cabo la división
+dataset_subclus$Class <- relevel(dataset_subclus$Class,"positive")
+index <- createDataPartition(dataset_subclus$Class, p = 0.7, list = FALSE)
+# División del conjunto de datos
+train_data_subclus <- dataset_subclus[index, ]
+test_data_subclus  <- dataset_subclus[-index, ] 
+```
+
+```{r echo=FALSE}
+set.seed(42)
+dataset_circle$Class <- relevel(dataset_circle$Class,"positive")
+index <- createDataPartition(dataset_circle$Class, p = 0.7, list = FALSE)
+train_data_circle <- dataset_circle[index, ]
+test_data_circle  <- dataset_circle[-index, ] 
+set.seed(42)
+iris0$Class <- relevel(iris0$Class,"positive")
+index <- createDataPartition(iris0$Class, p = 0.7, list = FALSE)
+train_data_iris0 <- iris0[index, ]
+test_data_iris0  <- iris0[-index, ] 
+rm(index)
+```
+
+A continuación, se entrena y se evalúa el modelo k-NN por medio 5-fold cv para el dataset *subclus*, técnica que se utilizará en el resto de ejecuciones de modelos de este trabajo:
+
+```{r}
+# 5-fold cv repetido 3 veces
+ctrl <- trainControl(method="repeatedcv",number=5,repeats = 3,
+                     classProbs=TRUE, summaryFunction = twoClassSummary)
+# Entrenamiento del modelo k-NN con datos sin preprocesado
+model.raw_sc <- learn_model(train_data_subclus, ctrl, "RAW ")
+# Test de calidad del modelo
+cm.raw_sc <- test_model(test_data_subclus, model.raw_sc, "RAW ")
+```
+
+Y se hace lo mismo para el dataset *circle*, del cual observamos su salida:
+
+```{r echo=FALSE}
+# Entrenamiento del modelo k-NN con datos sin preprocesado
+model.raw_c <- learn_model(train_data_circle, ctrl, "RAW ")
+# Test de calidad del modelo
+cm.raw_c <- test_model(test_data_circle, model.raw_c, "RAW ")
+```
+
+**Interpretación**: Se puede observar como en los datasets la clase mayoritaria se predice correctamente (Specificity), mientras que la minoritaria en se hace en menor medida (Sensitivity), siendo más claro en el caso del dataset subclus. Así, el objetivo al utilizar los algoritmos de resampling es aumentar la sensibilidad de nuestro modelo (Capacidad predictiva sobre casos de la clase minoritaria).
+
+## Random Oversampling (ROS)
+Se utiliza la técnica de Random OverSampling dentro del preprocesado de nuestro conjunto de datos *subclus*:
+
+```{r}
+# Entrenamiento del modelo k-NN con datos aplicando ROS
+ctrl <- trainControl(method="repeatedcv", number = 5, repeats = 3,
+                     classProbs=TRUE, summaryFunction = twoClassSummary, 
+                     sampling = "up")
+model.os_sc <- learn_model(train_data_subclus, ctrl, "Over Sampling")
+cm.os_sc <- test_model(test_data_subclus, model.os_sc, "Over Sampling")
+```
+
+Y se hace lo mismo para el dataset *circle*, del cual observamos su salida:
+
+```{r echo=FALSE}
+model.os_c <- learn_model(train_data_circle, ctrl, "Over Sampling")
+cm.os_c <- test_model(test_data_circle, model.os_c, "Over Sampling")
+```
+
+**Interpretación**: Se puede observar como en los datasets la clase minoritaria se predice mejor que sin resampling (mejor Sensitivity), pero a coste de reducir algo la predicción de la clase mayoritaria (peor Specificity). Para ambos datasets se da dicha circustancia y en los dos se mejora la precisión ajustada al desbalanceo de las clases (Balanced Accuracy).
+
+## Random Undersampling (RUS)
+Se utiliza la técnica de Random UnderSampling dentro del preprocesado de nuestro conjunto de datos *subclus*:
+
+```{r}
+# Entrenamiento del modelo k-NN con datos aplicando RUS
+ctrl <- trainControl(method="repeatedcv",number=5,repeats = 3,
+                     classProbs=TRUE,summaryFunction = twoClassSummary,
+                     sampling = "down")
+model.us_sc <- learn_model(train_data_subclus, ctrl, "Under Sampling")
+cm.us_sc <- test_model(test_data_subclus, model.us_sc, "Under Sampling")
+```
+
+Y se hace lo mismo para el dataset *circle*, del cual observamos su salida:
+
+```{r echo=FALSE}
+model.us_c <- learn_model(train_data_circle, ctrl, "Under Sampling")
+cm.us_c <- test_model(test_data_circle, model.us_c, "Under Sampling")
+```
+
+**Interpretación**: Se puede observar como en los datasets la clase minoritaria se predice mejor que sin resampling (mejor Sensitivity), pero a coste de reducir bastante la predicción de la clase mayoritaria (peor Specificity). En general se obtienen peores resultados que con ROS, estando también la precisión bastante por debajo.
+
+## Synthetic Minority Oversampling Technique (SMOTE)
+Se utiliza la técnica de SMOTE dentro del preprocesado de nuestro conjunto de datos *subclus*:
+
+```{r}
+# Entrenamiento del modelo k-NN con datos aplicando SMOTE
+ctrl <- trainControl(method="repeatedcv",number=5,repeats = 3,
+                     classProbs=TRUE, summaryFunction = twoClassSummary,
+                     sampling = "smote")
+model.smt_sc <- learn_model(train_data_subclus, ctrl, "SMOTE")
+cm.smt_sc <- test_model(test_data_subclus, model.smt_sc, "SMOTE")
+```
+
+Y se hace lo mismo para el dataset *circle*, del cual observamos su salida:
+
+```{r echo=FALSE}
+model.smt_c <- learn_model(train_data_circle, ctrl, "SMOTE")
+cm.smt_c <- test_model(test_data_circle, model.smt_c, "SMOTE")
+```
+
+**Interpretación**: Se puede observar como con SMOTE, la predicción de la clase minoritaria es buena, si bien con ROS era algo mejor en el conjunto *subclus*. En general, ofrece un buen equilibrio entre la sensibilidad y la especificidad, pues no penaliza tanto la predicción de la clase mayoritaria en pro de una mejor predicción de la minoritaria, si bien se ve una clara mejoría en ella.
+
+## Resumen de los algoritmos
+A continuación, se puede apreciar de forma gráfica un resumen de las principales medidas de calidad que resultan de interés según los objetivos del proyecto.
+
+En primer lugar apreciamos una comparativa entre ROC, sensiblidad y especificidad para el conjunto *subclus*:
+
+```{r echo=FALSE}
+models_sc <- list(raw_sc = model.raw_sc,
+               us_sc = model.us_sc,
+               os_sc = model.os_sc,
+               smt_sc = model.smt_sc)
+```
+
+```{r}
+resampling_sc <- resamples(models_sc)
+bwplot(resampling_sc)
+```
+
+Y lo mismo para el conjunto *circle*:
+
+```{r echo=FALSE}
+models_c <- list(raw_c = model.raw_c,
+               us_c = model.us_c,
+               os_c = model.os_c,
+               smt_c = model.smt_c)
+```
+
+```{r echo=FALSE}
+resampling_c <- resamples(models_c)
+bwplot(resampling_c)
+```
+
+**Interpretación**: Se puede apreciar para ambos conjuntos como la diferencia entre el modelo base sin preprocesado y los distintos métodos es significativa y cumple ciertos patrones. En cualquiera de los casos, la especificidad es penalizada al aplicar cualquiera de los algoritmos con respecto al modelo base, mientras que aumenta la sensibilidad notablemente y en mayor grado en el ROS.
+
+Del mismo modo, también se puede representar gráficamente un mayor abanico de medidas que resultan de interés, en primer lugar, para el análisis del efecto de los algoritmos de sampling el el dataset *subclus*:
+
+```{r echo=FALSE}
+comparison_sc <- data.frame(model = names(models_sc),
+                         Sensitivity = rep(NA, length(models_sc)),
+                         Specificity = rep(NA, length(models_sc)),
+                         Precision = rep(NA, length(models_sc)),
+                         Recall = rep(NA, length(models_sc)),
+                         F1 = rep(NA, length(models_sc)))
+
+for (name in names(models_sc)) {
+    cm_model <- get(paste0("cm.", name))
+    comparison_sc[comparison_sc$model == name, ] <- filter(comparison_sc, model == name) %>%
+        mutate(Sensitivity = cm_model$byClass["Sensitivity"],
+               Specificity = cm_model$byClass["Specificity"],
+               Precision = cm_model$byClass["Precision"],
+               Recall = cm_model$byClass["Recall"],
+               F1 = cm_model$byClass["F1"])
+}
+```
+
+```{r}
+comparison_sc %>%
+    gather(x, y, Sensitivity:F1) %>%
+    ggplot(aes(x = x, y = y, color = model)) +
+    geom_jitter(width = 0.2, alpha = 0.5, size = 3)
+```
+
+Y lo mismo para el conjunto *circle*:
+
+```{r echo=FALSE}
+comparison_c <- data.frame(model = names(models_c),
+                         Sensitivity = rep(NA, length(models_c)),
+                         Specificity = rep(NA, length(models_c)),
+                         Precision = rep(NA, length(models_c)),
+                         Recall = rep(NA, length(models_c)),
+                         F1 = rep(NA, length(models_c)))
+
+for (name in names(models_c)) {
+    cm_model <- get(paste0("cm.", name))
+    comparison_c[comparison_c$model == name, ] <- filter(comparison_c, model == name) %>%
+        mutate(Sensitivity = cm_model$byClass["Sensitivity"],
+               Specificity = cm_model$byClass["Specificity"],
+               Precision = cm_model$byClass["Precision"],
+               Recall = cm_model$byClass["Recall"],
+               F1 = cm_model$byClass["F1"])
+}
+```
+
+```{r echo=FALSE}
+comparison_sc %>%
+    gather(x, y, Sensitivity:F1) %>%
+    ggplot(aes(x = x, y = y, color = model)) +
+    geom_jitter(width = 0.2, alpha = 0.5, size = 3)
+```
+
+**Interpretación**: A diferencia de los gráficos anteriores, en estos se representa el F1-score, donde apreciamos que para ambos datasets, el algoritmo que mejor equilibrio consigue entre la precisión y la exhaustividad de nuestro modelo.
+
+\newpage
+
+# Paquete imbalance y combinación de técnicas
+
+## Técnicas disponibles en el paquete
+
+### PDFOS
+Efecto del algoritmo de sampling Probability Density Function (PDF) estimation based Over-Sampling (PDFOS):
+
+```{r}
+train_data_sc_pdfos <- imbalance::oversample(dataset = train_data_subclus, 
+                                             method = "PDFOS", ratio = 0.5)
+imbalance::plotComparison(train_data_subclus, train_data_sc_pdfos, 
+                          attrs = names(train_data_sc_pdfos)[-ncol(train_data_sc_pdfos)], 
+                          classAttr = names(train_data_sc_pdfos)[ncol(train_data_sc_pdfos)])
+```
+
+Se realiza el mismo análisis sobre el conjunto de datos *circle*:
+
+```{r}
+train_data_c_pdfos <- imbalance::oversample(dataset = train_data_circle, 
+                                            method = "PDFOS", ratio = 0.5)
+imbalance::plotComparison(train_data_circle, train_data_c_pdfos, 
+                          attrs = names(train_data_c_pdfos)[-ncol(train_data_c_pdfos)], 
+                          classAttr = names(train_data_c_pdfos)[ncol(train_data_c_pdfos)])
+```
+
+### RWO
+Efecto del algoritmo de sampling Windowed Regression Over-sampling (RWO) sobre el dataset *subclus*:
+
+```{r}
+train_data_sc_rwo <- imbalance::oversample(dataset = train_data_subclus, 
+                                           method = "RWO", ratio = 0.5)
+imbalance::plotComparison(train_data_subclus, train_data_sc_rwo, 
+                          attrs = names(train_data_sc_rwo)[-ncol(train_data_sc_rwo)], 
+                          classAttr = names(train_data_sc_rwo)[ncol(train_data_sc_rwo)])
+```
+
+Se realiza el mismo análisis sobre el conjunto de datos *circle*:
+
+```{r}
+train_data_c_rwo <- imbalance::oversample(dataset = train_data_circle, 
+                                          method = "RWO", ratio = 0.5)
+imbalance::plotComparison(train_data_circle, train_data_c_rwo, 
+                          attrs = names(train_data_c_rwo)[-ncol(train_data_c_rwo)], 
+                          classAttr = names(train_data_c_rwo)[ncol(train_data_c_rwo)])
+```
+
+### ADASYN
+Efecto del algoritmo de sampling Adaptive Synthetic (ADASYN) sobre el dataset *subclus*:
+
+```{r}
+train_data_sc_adasyn <- imbalance::oversample(dataset = train_data_subclus, 
+                                              method = "ADASYN")
+imbalance::plotComparison(train_data_subclus, train_data_sc_adasyn, 
+                          attrs = names(train_data_sc_adasyn)[-ncol(train_data_sc_adasyn)], 
+                          classAttr = names(train_data_sc_adasyn)[ncol(train_data_sc_adasyn)])
+```
+
+Se realiza el mismo análisis sobre el conjunto de datos *circle*:
+
+```{r}
+train_data_c_adasyn <- imbalance::oversample(dataset = train_data_circle, 
+                                             method = "ADASYN")
+imbalance::plotComparison(train_data_circle, train_data_c_adasyn, 
+                          attrs = names(train_data_c_adasyn)[-ncol(train_data_c_adasyn)], 
+                          classAttr = names(train_data_c_adasyn)[ncol(train_data_c_adasyn)])
+```
+
+### ANSMOTE
+Efecto del algoritmo de sampling ANSMOTE sobre el dataset *subclus*:
+
+```{r}
+train_data_sc_ansmote <- imbalance::oversample(dataset = train_data_subclus, 
+                                               method = "ANSMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_subclus, train_data_sc_ansmote, 
+                          attrs = names(train_data_sc_ansmote)[-ncol(train_data_sc_ansmote)], 
+                          classAttr = names(train_data_sc_ansmote)[ncol(train_data_sc_ansmote)])
+```
+
+Se realiza el mismo análisis sobre el conjunto de datos *circle*:
+
+```{r}
+train_data_c_ansmote <- imbalance::oversample(dataset = train_data_circle, 
+                                              method = "ANSMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_circle, train_data_c_ansmote, 
+                          attrs = names(train_data_c_ansmote)[-ncol(train_data_c_ansmote)], 
+                          classAttr = names(train_data_c_ansmote)[ncol(train_data_c_ansmote)])
+```
+
+### MWMOTE
+Efecto del algoritmo de sampling MWMOTE sobre el dataset *subclus*:
+
+```{r}
+train_data_sc_mwmote <- imbalance::oversample(dataset = train_data_subclus, 
+                                              method = "MWMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_subclus, train_data_sc_mwmote, 
+                          attrs = names(train_data_sc_mwmote)[-ncol(train_data_sc_mwmote)], 
+                          classAttr = names(train_data_sc_mwmote)[ncol(train_data_sc_mwmote)])
+```
+
+Se realiza el mismo análisis sobre el conjunto de datos *circle*:
+
+```{r}
+train_data_c_mwmote <- imbalance::oversample(dataset = train_data_circle, 
+                                             method = "MWMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_circle, train_data_c_mwmote, 
+                          attrs = names(train_data_c_mwmote)[-ncol(train_data_c_mwmote)], 
+                          classAttr = names(train_data_c_mwmote)[ncol(train_data_c_mwmote)])
+```
+
+### BLSMOTE
+Efecto del algoritmo de sampling BLSMOTE sobre el dataset *subclus*:
+
+```{r}
+train_data_sc_blsmote <- imbalance::oversample(dataset = train_data_subclus, 
+                                               method = "BLSMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_subclus, train_data_sc_blsmote, 
+                          attrs = names(train_data_sc_blsmote)[-ncol(train_data_sc_blsmote)], 
+                          classAttr = names(train_data_sc_blsmote)[ncol(train_data_sc_blsmote)])
+```
+
+Se realiza el mismo análisis sobre el conjunto de datos *circle*:
+
+```{r}
+train_data_c_blsmote <- imbalance::oversample(dataset = train_data_circle, 
+                                              method = "BLSMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_circle, train_data_c_blsmote, 
+                          attrs = names(train_data_c_blsmote)[-ncol(train_data_c_blsmote)], 
+                          classAttr = names(train_data_c_blsmote)[ncol(train_data_c_blsmote)])
+```
+
+### DBSMOTE
+Efecto del algoritmo de sampling DBSMOTE sobre el dataset *subclus*:
+
+```{r}
+train_data_sc_dbsmote <- imbalance::oversample(dataset = train_data_subclus, 
+                                               method = "DBSMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_subclus, train_data_sc_dbsmote, 
+                          attrs = names(train_data_sc_dbsmote)[-ncol(train_data_sc_dbsmote)], 
+                          classAttr = names(train_data_sc_dbsmote)[ncol(train_data_sc_dbsmote)])
+```
+
+Se realiza el mismo análisis sobre el conjunto de datos *circle*:
+
+```{r}
+train_data_c_dbsmote <- imbalance::oversample(dataset = train_data_circle, 
+                                              method = "DBSMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_circle, train_data_c_dbsmote, 
+                          attrs = names(train_data_c_dbsmote)[-ncol(train_data_c_dbsmote)], 
+                          classAttr = names(train_data_c_dbsmote)[ncol(train_data_c_dbsmote)])
+```
+
+### SLMOTE
+Efecto del algoritmo de sampling SLMOTE sobre el dataset *subclus*:
+
+```{r}
+train_data_sc_slmote <- imbalance::oversample(dataset = train_data_subclus, 
+                                              method = "SLMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_subclus, train_data_sc_slmote, 
+                          attrs = names(train_data_sc_slmote)[-ncol(train_data_sc_slmote)], 
+                          classAttr = names(train_data_sc_slmote)[ncol(train_data_sc_slmote)])
+```
+
+Se realiza el mismo análisis sobre el conjunto de datos *circle*:
+
+```{r}
+train_data_c_slmote <- imbalance::oversample(dataset = train_data_circle, 
+                                             method = "SLMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_circle, train_data_c_slmote, 
+                          attrs = names(train_data_c_slmote)[-ncol(train_data_c_slmote)], 
+                          classAttr = names(train_data_c_slmote)[ncol(train_data_c_slmote)])
+```
+
+### RSLSMOTE
+Efecto del algoritmo de sampling RSLSMOTE sobre el dataset *subclus*:
+
+```{r}
+train_data_sc_rslsmote <- imbalance::oversample(dataset = train_data_subclus, 
+                                                method = "RSLSMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_subclus, train_data_sc_rslsmote, 
+                          attrs = names(train_data_sc_rslsmote)[-ncol(train_data_sc_rslsmote)], 
+                          classAttr = names(train_data_sc_rslsmote)[ncol(train_data_sc_rslsmote)])
+```
+
+Se realiza el mismo análisis sobre el conjunto de datos *circle*:
+
+```{r}
+train_data_c_rslsmote <- imbalance::oversample(dataset = train_data_circle, 
+                                               method = "SLMOTE", ratio = 0.5)
+imbalance::plotComparison(train_data_circle, train_data_c_rslsmote, 
+                          attrs = names(train_data_c_rslsmote)[-ncol(train_data_c_rslsmote)], 
+                          classAttr = names(train_data_c_rslsmote)[ncol(train_data_c_rslsmote)])
+```
+
+## Comparativa entre las distintas técnicas
+A continuación, se representa en un diagrama el resultado de la ejecución de modelos k-NN entrenados con los datos previamente modificados mediante los algoritmos mostrados anteriormente. En primer lugar se muestra el resultado de la predicción sobre el conjunto de test para el dataset *subclus*:
+
+```{r echo=FALSE, results="hide"}
+train_data_i_pdfos <- imbalance::oversample(dataset = train_data_iris0, 
+                                             method = "PDFOS", ratio = 0.7)
+train_data_i_rwo <- imbalance::oversample(dataset = train_data_iris0, 
+                                           method = "RWO", ratio = 0.7)
+train_data_i_ansmote <- imbalance::oversample(dataset = train_data_iris0, 
+                                               method = "ANSMOTE", ratio = 0.7)
+train_data_i_mwmote <- imbalance::oversample(dataset = train_data_iris0, 
+                                              method = "MWMOTE", ratio = 0.6)
+train_data_i_dbsmote <- imbalance::oversample(dataset = train_data_iris0, 
+                                               method = "DBSMOTE", ratio = 0.5)
+train_data_i_slmote <- imbalance::oversample(dataset = train_data_iris0, 
+                                              method = "SLMOTE", ratio = 0.5)
+train_data_i_rslsmote <- imbalance::oversample(dataset = train_data_iris0, 
+                                                method = "RSLSMOTE", ratio = 0.5)
+
+ctrl <- trainControl(method="repeatedcv",number=5,repeats = 3,
+                     classProbs=TRUE, summaryFunction = twoClassSummary)
+
+model.raw_i <- learn_model(train_data_iris0, ctrl, "RAW")
+cm.raw_i <- test_model(test_data_iris0, model.raw_i, "RAW", FALSE)
+
+model.pdfos_sc <- learn_model(train_data_sc_pdfos, ctrl, "PDFOS")
+cm.pdfos_sc <- test_model(test_data_subclus, model.pdfos_sc, "PDFOS", FALSE)
+model.pdfos_c <- learn_model(train_data_c_pdfos, ctrl, "PDFOS")
+cm.pdfos_c <- test_model(test_data_circle, model.pdfos_c, "PDFOS", FALSE)
+model.pdfos_i <- learn_model(train_data_i_pdfos, ctrl, "PDFOS")
+cm.pdfos_i <- test_model(test_data_iris0, model.pdfos_i, "PDFOS", FALSE)
+
+model.rwo_sc <- learn_model(train_data_sc_rwo, ctrl, "RWO")
+cm.rwo_sc <- test_model(test_data_subclus, model.rwo_sc, "RWO", FALSE)
+model.rwo_c <- learn_model(train_data_c_rwo, ctrl, "RWO")
+cm.rwo_c <- test_model(test_data_circle, model.rwo_c, "RWO", FALSE)
+model.rwo_i <- learn_model(train_data_iris0, ctrl, "RWO")
+cm.rwo_i <- test_model(test_data_iris0, model.rwo_i, "RWO", FALSE)
+
+model.adasyn_sc <- learn_model(train_data_sc_adasyn, ctrl, "ADASYN")
+cm.adasyn_sc <- test_model(test_data_subclus, model.adasyn_sc, "ADASYN", FALSE)
+model.adasyn_c <- learn_model(train_data_c_adasyn, ctrl, "ADASYN")
+cm.adasyn_c <- test_model(test_data_circle, model.adasyn_c, "ADASYN", FALSE)
+
+model.ansmote_sc <- learn_model(train_data_sc_ansmote, ctrl, "ANSMOTE")
+cm.ansmote_sc <- test_model(test_data_subclus, model.ansmote_sc, "ANSMOTE", FALSE)
+model.ansmote_c <- learn_model(train_data_c_ansmote, ctrl, "ANSMOTE")
+cm.ansmote_c <- test_model(test_data_circle, model.ansmote_c, "ANSMOTE", FALSE)
+model.ansmote_i <- learn_model(train_data_i_ansmote, ctrl, "ANSMOTE")
+cm.ansmote_i <- test_model(test_data_iris0, model.ansmote_i, "ANSMOTE", FALSE)
+
+model.mwmote_sc <- learn_model(train_data_sc_mwmote, ctrl, "MWMOTE")
+cm.mwmote_sc <- test_model(test_data_subclus, model.mwmote_sc, "MWMOTE", FALSE)
+model.mwmote_c <- learn_model(train_data_c_mwmote, ctrl, "MWMOTE")
+cm.mwmote_c <- test_model(test_data_circle, model.mwmote_c, "MWMOTE", FALSE)
+model.mwmote_i <- learn_model(train_data_i_mwmote, ctrl, "MWMOTE")
+cm.mwmote_i <- test_model(test_data_iris0, model.mwmote_i, "MWMOTE", FALSE)
+
+model.blsmote_sc <- learn_model(train_data_sc_blsmote, ctrl, "BLSMOTE")
+cm.blsmote_sc <- test_model(test_data_subclus, model.blsmote_sc, "BLSMOTE", FALSE)
+model.blsmote_c <- learn_model(train_data_c_blsmote, ctrl, "BLSMOTE")
+cm.blsmote_c <- test_model(test_data_circle, model.blsmote_c, "BLSMOTE", FALSE)
+
+model.dbsmote_sc <- learn_model(train_data_sc_dbsmote, ctrl, "DBSMOTE")
+cm.dbsmote_sc <- test_model(test_data_subclus, model.dbsmote_sc, "DBSMOTE", FALSE)
+model.dbsmote_c <- learn_model(train_data_c_dbsmote, ctrl, "DBSMOTE")
+cm.dbsmote_c <- test_model(test_data_circle, model.dbsmote_c, "DBSMOTE", FALSE)
+model.dbsmote_i <- learn_model(train_data_i_dbsmote, ctrl, "DBSMOTE")
+cm.dbsmote_i <- test_model(test_data_iris0, model.dbsmote_i, "DBSMOTE", FALSE)
+
+model.slmote_sc <- learn_model(train_data_sc_slmote, ctrl, "SLMOTE")
+cm.slmote_sc <- test_model(test_data_subclus, model.slmote_sc, "SLMOTE", FALSE)
+model.slmote_c <- learn_model(train_data_c_slmote, ctrl, "SLMOTE")
+cm.slmote_c <- test_model(test_data_circle, model.slmote_c, "SLMOTE", FALSE)
+model.slmote_i <- learn_model(train_data_i_slmote, ctrl, "SLMOTE")
+cm.slmote_i <- test_model(test_data_iris0, model.slmote_i, "SLMOTE", FALSE)
+
+model.rslsmote_sc <- learn_model(train_data_sc_rslsmote, ctrl, "RSLSMOTE")
+cm.rslsmote_sc <- test_model(test_data_subclus, model.rslsmote_sc, "RSLSMOTE", FALSE)
+model.rslsmote_c <- learn_model(train_data_c_rslsmote, ctrl, "RSLSMOTE")
+cm.rslsmote_c <- test_model(test_data_circle, model.rslsmote_c, "RSLSMOTE", FALSE)
+model.rslsmote_i <- learn_model(train_data_i_rslsmote, ctrl, "RSLSMOTE")
+cm.rslsmote_i <- test_model(test_data_iris0, model.rslsmote_i, "RSLSMOTE", FALSE)
+
+models_sc <- list(raw_sc = model.raw_sc,
+                  pdfos_sc = model.pdfos_sc,
+                  rwo_sc = model.rwo_sc,
+                  adasyn_sc = model.adasyn_sc,
+                  ansmote_sc = model.ansmote_sc,
+                  mwmote_sc = model.mwmote_sc,
+                  blsmote_sc = model.blsmote_sc,
+                  dbsmote_sc = model.dbsmote_sc,
+                  slmote_sc = model.slmote_sc,
+                  rslsmote_sc = model.rslsmote_sc)
+
+comparison_sc <- data.frame(model = names(models_sc),
+                         Sensitivity = rep(NA, length(models_sc)),
+                         Specificity = rep(NA, length(models_sc)),
+                         Precision = rep(NA, length(models_sc)),
+                         Recall = rep(NA, length(models_sc)),
+                         F1 = rep(NA, length(models_sc)))
+
+for (name in names(models_sc)) {
+    cm_model <- get(paste0("cm.", name))
+    comparison_sc[comparison_sc$model == name, ] <- filter(comparison_sc, model == name) %>%
+        mutate(Sensitivity = cm_model$byClass["Sensitivity"],
+               Specificity = cm_model$byClass["Specificity"],
+               Precision = cm_model$byClass["Precision"],
+               Recall = cm_model$byClass["Recall"],
+               F1 = cm_model$byClass["F1"])
+}
+
+models_c <- list(raw_c = model.raw_c,
+                 pdfos_c = model.pdfos_c,
+                 rwo_c = model.rwo_c,
+                 adasyn_c = model.adasyn_c,
+                 ansmote_c = model.ansmote_c,
+                 mwmote_c = model.mwmote_c,
+                 blsmote_c = model.blsmote_c,
+                 dbsmote_c = model.dbsmote_c,
+                 slmote_c = model.slmote_c,
+                 rslsmote_c = model.rslsmote_c)
+
+comparison_c <- data.frame(model = names(models_c),
+                         Sensitivity = rep(NA, length(models_c)),
+                         Specificity = rep(NA, length(models_c)),
+                         Precision = rep(NA, length(models_c)),
+                         Recall = rep(NA, length(models_c)),
+                         F1 = rep(NA, length(models_c)))
+
+for (name in names(models_c)) {
+    cm_model <- get(paste0("cm.", name))
+    comparison_c[comparison_c$model == name, ] <- filter(comparison_c, model == name) %>%
+        mutate(Sensitivity = cm_model$byClass["Sensitivity"],
+               Specificity = cm_model$byClass["Specificity"],
+               Precision = cm_model$byClass["Precision"],
+               Recall = cm_model$byClass["Recall"],
+               F1 = cm_model$byClass["F1"])
+}
+
+models_i <- list(raw_i = model.raw_i,
+                 pdfos_i = model.pdfos_i,
+                 rwo_i = model.rwo_i,
+                 ansmote_i = model.ansmote_i,
+                 mwmote_i = model.mwmote_i,
+                 dbsmote_i = model.dbsmote_i,
+                 slmote_i = model.slmote_i,
+                 rslsmote_i = model.rslsmote_i)
+
+comparison_i <- data.frame(model = names(models_i),
+                         Sensitivity = rep(NA, length(models_i)),
+                         Specificity = rep(NA, length(models_i)),
+                         Precision = rep(NA, length(models_i)),
+                         Recall = rep(NA, length(models_i)),
+                         F1 = rep(NA, length(models_i)))
+
+for (name in names(models_i)) {
+    cm_model <- get(paste0("cm.", name))
+    comparison_i[comparison_i$model == name, ] <- filter(comparison_i, model == name) %>%
+        mutate(Sensitivity = cm_model$byClass["Sensitivity"],
+               Specificity = cm_model$byClass["Specificity"],
+               Precision = cm_model$byClass["Precision"],
+               Recall = cm_model$byClass["Recall"],
+               F1 = cm_model$byClass["F1"])
+}
+```
+
+```{r}
+comparison_sc %>%
+    gather(x, y, Sensitivity:F1) %>%
+    ggplot(aes(x = x, y = y, color = model)) +
+    geom_jitter(width = 0.2, alpha = 0.5, size = 3) +
+    ggtitle("Comparativa de los algoritmos para subclus")
+```
+
+**Interpretación**: Para este conjunto de datos, se puede apreciar que el algoritmo que mejor equilibrio consigue entre la precisión y la exhaustividad de nuestro modelo es el DBSMOTE. Así, DBSMOTE también consigue la mejor precisión y es el algoritmo que mejor predice la clase mayoritaria, obteniendo la mejor especcificidad. Por su parte, el algoritmo que mejor predice la clase minoritaria es ADASYN. 
+
+Se lleva a cabo la misma comparativa pero para el conjunto de datos *circle*:
+
+```{r echo=FALSE}
+comparison_c %>%
+    gather(x, y, Sensitivity:F1) %>%
+    ggplot(aes(x = x, y = y, color = model)) +
+    geom_jitter(width = 0.2, alpha = 0.5, size = 3) +
+    ggtitle("Comparativa de los algoritmos para circle")
+```
+
+**Interpretación**: Para este conjunto de datos, hay tres algoritmos que consiguen un buen equilibrio entre la precisión y la exhaustividad, siendo estos ANSMOTE, DBSMOTE y RSLSMOTE. Así, los algoritmos que mayor precisión tienen seran pues estos mismos tres. MWMOTE y PDFOS son los algoritmos que mejor predicen la clase minoritaria, mientras que para este conjunto de datos concreto, todos los algoritmos consiguen una especificidad perfecta o casi perfecta.
+
+## Comparativa entre las distintas técnicas para conjunto de datos Iris0
+La misma comparativa efectuada para los conjuntos de datos *circle* y *subclus*, será llevada a cabo para el conjunto de datos Iris0, cuyo gráfico de modelos k-NN resultantes tras la aplicación de cada uno de los distintos algoritmos de sampling puede ser observada a continuación:
+
+```{r echo=FALSE}
+comparison_i %>%
+    gather(x, y, Sensitivity:F1) %>%
+    ggplot(aes(x = x, y = y, color = model)) +
+    geom_jitter(width = 0.1, alpha = 0.5, size = 3, height = 0.001) +
+    ggtitle("Comparativa de los algoritmos para Iris0")
+```
+
+**Interpretación**: Para este conjunto de datos, se puede apreciar como aun inbalanceado, la clasificación que hace el modelo sin aplicar algoritmos de sampling es perfecta, obteniendo una F1-score y precisión de 1 y por tanto, prediciendo perfectamente la clase mayoritaria y minoritaria. Los algoritmos que disminuyen la sensibilidad de nuestro modelo son en este caso, el RSLSMOTE y el SLMOTE.
